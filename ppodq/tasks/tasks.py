@@ -21,6 +21,6 @@ def getDeliveryInfo(isbn):
     """
     oasis_url= os.getenv('OASIS_URL',None)
     oasis_url = "{0}&ISBN={1}".format(oasis_url,isbn)
-    req= request.get(oasis_url)
+    req= requests.get(oasis_url)
     # data=req.json()
     return req.json()
