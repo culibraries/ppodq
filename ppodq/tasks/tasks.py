@@ -14,7 +14,7 @@ def add(x, y):
     return result
 
 
-@tasks()
+@task()
 def getDeliveryInfo(isbn):
     """ Example task
         return book info 
