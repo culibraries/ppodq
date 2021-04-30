@@ -28,8 +28,6 @@ def getDeliveryInfo(isbn):
     oasis_api_key = os.getenv('OASIS_API_KEY', None)
     oasis_url = "https://{0}/stockcheck/".format(oasis_host)
 
-    print(oasis_url);
-
     # Oasis stock check API requires our api key and the isbn number
     requestData = {
         'apiKey': oasis_api_key,
@@ -56,15 +54,11 @@ def getDeliveryInfo(isbn):
         """
         response_data = response.json()
 
-        print(response.status_code)
-        print("My response json:")
-        print(response_data)
-
         # request was successfully received
         if (response.status_code == 200):
             result['code'] = response_data["Code"]
 
-            # Oasis API sent a  successful response
+            # Oasis API sent a successful response
             if (response_data["Code"] == 0):
                 delivery_days = int(response_data["DeliveryDays"])
                 result['deliveryDays'] = delivery_days 
