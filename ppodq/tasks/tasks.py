@@ -3,6 +3,7 @@ import os
 import requests
 from requests.exceptions import Timeout, ConnectionError, HTTPError
 from enum import Enum
+from time import time
 
 
 ########  ENV VARIABLES  ########
@@ -12,6 +13,7 @@ TOKEN = os.getenv('PPOD_SYSTEM_TOKEN')
 REPLY_EMAIL = os.getenv('REPLY_EMAIL_ADDRESS')
 STAFF_EMAIL = os.getenv('STAFF_EMAIL_ADDRESS')
 EMAIL_URL = os.getenv('EMAIL_URL')
+DB_URL = os.getenv('DB_URL')
 
 ######## GLOBAL CONSTANTS  ########
 REQUEST_TIMEOUT = (15, 21) # connection and read timeouts in seconds
@@ -44,6 +46,7 @@ def getDeliveryInfo(isbn):
     # result that will return to caller/client 
     result = {
         'code': 0,
+        'message': '',
         'deliveryDays': -1,
         'deliveryDaysAdjusted': -1
     }
@@ -53,65 +56,46 @@ def getDeliveryInfo(isbn):
         result["code"] = 400
         return result
 
-    # construct the url (without params)
-    oasis_url = "https://{0}/stockcheck/".format(OASIS_HOST)
+    """
+    Expecting to receive back from OASIS the following fields
+    of which we only care about the last three::
+       Environment: 'Development',
+       RequestEnd: '/Date(1618604720623+0000)/',
+       RequestStart: '/Date(1618604720266+0000)/',
+       Code: 0,
+       DeliveryDays: '14',
+       Message: 'OASIS Accepts Orders'
+    """
+    response = callOasisAPI("stockcheck", isbn)
 
-    # Oasis stock check API requires our api key and the isbn number
-    requestData = {
-        'apiKey': OASIS_API_KEY,
-        'ISBN': isbn}
+    if response["status_code"] == 200:
+        response_data = response["response_json"]
 
-    # Call Oasis API that returns the delivery days for given ISBN.
-    try:
-        response = requests.get(
-            oasis_url,
-            params = requestData,
-            timeout = REQUEST_TIMEOUT)
+        # save the code returned by the API
+        result["code"] = response_data["Code"]
 
-        """
-        Expecting to receive json with items:
-           Environment: 'Development',
-           RequestEnd: '/Date(1618604720623+0000)/',
-           RequestStart: '/Date(1618604720266+0000)/',
-           Code: 0,
-           DeliveryDays: '14',
-           Message: 'OASIS Accepts Orders'
-        """
-        response_data = response.json()
+        # Oasis API sent a successful response
+        if response_data["Code"] == 0:
+            delivery_days = int(response_data["DeliveryDays"])
+            result['deliveryDays'] = delivery_days
 
-        # request was successfully received
-        if (response.status_code == 200):
-            result['code'] = response_data["Code"]
-
-            # Oasis API sent a successful response
-            if (response_data["Code"] == 0):
-                delivery_days = int(response_data["DeliveryDays"])
-                result['deliveryDays'] = delivery_days
-
-                # calculate the adjusted delivery days
-                if (delivery_days < 5):
-                    result['deliveryDaysAdjusted'] = 18
-                else:
-                    result['deliveryDaysAdjusted'] = delivery_days + 4
-            # Oasis API responded with a failure
+            # calculate the adjusted delivery days
+            if (delivery_days < 5):
+                result['deliveryDaysAdjusted'] = 18
             else:
-                result['code'] = 400
+                result['deliveryDaysAdjusted'] = delivery_days + 18
         else:
-            result['code'] = response.status.code
-
-    # Handle all common errors that could occur with request
-    except Timeout as err:
-        print(err)
-        result['code'] = 408
-    except (ConnectionError, HTTPError) as err:
-        print(err)
-        result['code'] = 400
+            result["message"] = response_data["Message"]
+    else:
+        result["code"] = response["status_code"]
+        result["message"] = response_data["Message"]
 
     # return our result
     return result
 
+
 @task(serializer='json')
-def submitOrder(idKey, form_data):
+def submitOrder(id_key, form_data):
     """
     PPOD submit book order and notify patron and staff via email. 
     Submitting an order will trigger the book to be ordered via OASIS API
@@ -128,17 +112,35 @@ def submitOrder(idKey, form_data):
         'message': ''
     }
 
-    # TODO - form data validation
-    if form_data["delivery_type"] not in ["rush", "regular"]:
+    # check we have all the required form data
+    if not all(k in form_data for k in 
+        ("first_name", "last_name", "email",
+         "department", "affiliation", "title", "author", "isbn",
+         "delivery_days", "delivery_days_adjusted", "delivery_type")):
         result["code"] = 400
-        result.message = "Invalid Delivery Type"
+        result["message"] = "Missing data"
         return result
 
+    # further validate the delivery type is valid 
+    if form_data["delivery_type"] not in ["rush", "regular"]:
+        result["code"] = 400
+        result["message"] = "Invalid Delivery Type"
+        return result
 
-    # TODO - Insert into DB 
+    # ensure we have values for specific form data
+    if (not form_data["isbn"] or
+        not form_data["delivery_days_adjusted"] or
+        not form_data["first_name"] or
+        not form_data["last_name"] or
+        not form_data["email"]):
+        result["code"] = 400
+        result["message"] = "Missing data"
+        return result
 
+    # Insert order request in DB 
+    response = recordBookOrder(id_key, form_data)
 
-    # Setup and send an order confirmation email to patron
+    # Setup and email an order confirmation to patron
     email_setting = setupEmail(PPOD_EMAIL_TYPE.CONFIRMATION_TO_PATRON,
                                form_data["email"], form_data)
     try:
@@ -173,10 +175,52 @@ def submitOrder(idKey, form_data):
 
     # For regular orders, place the order with OASIS and email staff
     else:
-        # TODO - Order the book first then poll request to inform staff 
-        #        of any errors 
-        email_setting = setupEmail(PPOD_EMAIL_TYPE.REGULAR_ORDER_NOTICE,
-                                   form_data["email"], form_data)
+        order_error = False 
+
+        """
+        Expecting to receive back from OASIS the following fields
+        of which we only care about the last two::
+           Environment: 'Development',
+           RequestEnd: '/Date(1618604720623+0000)/',
+           RequestStart: '/Date(1618604720266+0000)/',
+           OrderNumber: '',
+           Code: 100,
+           Message: 'Success'
+        """
+        response = callOasisAPI("order", form_data["isbn"])
+        if response["status_code"] == 200:
+            response_data = response["response_json"]
+
+            result["message"] = response_data["Message"]
+
+            # Oasis API sent a successful response
+            if response_data["Code"] == 100:
+                order_error = False
+                result["code"] = 0 
+
+            # Oasis API did not recognize ISBN
+            elif response_data["Code"] == 200:
+                order_error = True
+                result["code"] = 400
+                print(result)
+            # Oasis API general error 
+            else:
+                order_error = True
+                result["code"] = response_data["Code"] 
+
+        else:
+            order_error = True
+            result["code"] = response["status_code"]
+
+        # determing if staff gets order notification email or error notice 
+        if not order_error:
+            email_setting = setupEmail(PPOD_EMAIL_TYPE.REGULAR_ORDER_NOTICE,
+                                       form_data["email"], form_data)
+        else:
+            print("send error email")
+            email_setting = setupEmail(PPOD_EMAIL_TYPE.ERROR_ORDER_NOTICE,
+                                       form_data["email"], form_data)
+
         try:
             response = requests.post(
                 email_setting["url"],
@@ -189,12 +233,98 @@ def submitOrder(idKey, form_data):
             # Log request errors
             print(err)
 
-
     # return our result
     return result
 
 
-########  HELPER FUNCTIONS  ########  
+########  HELPER FUNCTIONS  ########
+
+def recordBookOrder(id_key, db_data):
+
+    # construct the DB url with DB name
+    url = "{0}{1}/".format(DB_URL, 'ppod')
+
+    # the header requires authorization via token
+    headers = {"Authorization": "Token {0}".format(TOKEN)}
+
+    current_timestamp = time() 
+
+    # store all the form data plus current timestamp
+    post_data = {
+        "username": id_key,
+        "first_name": db_data["first_name"],
+        "last_name": db_data["last_name"],
+        "email": db_data["email"],
+        "department": db_data["department"],
+        "affiliation": db_data["affiliation"],
+        "title": db_data["title"],
+        "author": db_data["author"],
+        "isbn": db_data["isbn"],
+        "delivery_days": db_data["delivery_days"],
+        "delivery_days_adjusted": db_data["delivery_days_adjusted"],
+        "delivery_type": db_data["delivery_type"],
+        "create_timestamp": str(current_timestamp)}
+
+    try:
+        response = requests.post(
+            url,
+            json = post_data,
+            headers = headers,
+            timeout = REQUEST_TIMEOUT)
+
+    # handle errors for sending email to staff by logging it
+    except (Timeout, ConnectionError, HTTPError) as err:
+        # Log request errors
+        print(err)
+
+
+def callOasisAPI(api_end_point, isbn):
+
+    # returning item initialized 
+    result = {
+        "status_code": 200,
+        "response_json": {} 
+    }
+
+    # construct the url (without params)
+    oasis_url = "https://{0}/{1}".format(OASIS_HOST, api_end_point)
+
+    # Oasis stock check API requires our api key and the isbn number
+    requestData = {
+        "apiKey": OASIS_API_KEY,
+        "ISBN": isbn
+    }
+
+    # order api endpoint has two other params
+    if (api_end_point == 'order'):
+        requestData["Quanity"] = 1
+        requestData["Dupeover"] = "false"
+
+    # Call ProQuest Oasis API which returns the delivery days for given ISBN
+    try:
+        response = requests.get(
+            oasis_url,
+            params = requestData,
+            timeout = REQUEST_TIMEOUT)
+
+        result["status_code"] = response.status_code
+
+        # request was successfully received
+        if (response.status_code == 200):
+            # as long as the request came back without error we are good..
+            # It will be the caller's responsiblity to check endpoint status 
+            result["response_json"] = response.json()
+
+    # Handle all common errors that could occur with request
+    except Timeout as err:
+        print(err)
+        result["status_code"] = 408
+    except (ConnectionError, HTTPError) as err:
+        print(err)
+        result['statu_code'] = 400
+
+    return result
+
 
 def setupEmail(email_type, patron_email, email_data):
     """
