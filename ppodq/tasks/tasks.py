@@ -35,13 +35,17 @@ class PPOD_EMAIL_TYPE(Enum):
 ########  TASKS  ########  
 
 @task(serializer='json')
-def getDeliveryInfo(isbn):
+def getDeliveryInfo(id_key, isbn):
     """
     Ask Oasis to provide book delivery info
     for given isbn.
     args: isbn
     kwargs: {}
     """
+
+    # ensure we have an authenticated user
+    if submitOrder.request.authenticated_user.username != id_key:
+        raise RuntimeError("Not Authorized")
 
     # result that will return to caller/client 
     result = {
@@ -111,6 +115,10 @@ def submitOrder(id_key, form_data):
         'code': 0,
         'message': ''
     }
+
+    # ensure we have an authenticated user
+    if submitOrder.request.authenticated_user.username != id_key:
+        raise RuntimeError("Not Authorized")
 
     # check we have all the required form data
     if not all(k in form_data for k in 
