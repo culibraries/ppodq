@@ -44,7 +44,7 @@ def getDeliveryInfo(id_key, isbn):
     """
 
     # ensure we have an authenticated user
-    if getDeliveryInfo.request.authenticated_user.username != id_key:
+    if getDeliveryInfo.request.authenticated_user.get('username') != id_key:
         raise RuntimeError("Not Authorized")
 
     # result that will return to caller/client 
@@ -117,7 +117,7 @@ def submitOrder(id_key, form_data):
     }
 
     # ensure we have an authenticated user
-    if submitOrder.request.authenticated_user.username != id_key:
+    if submitOrder.request.authenticated_user.get('username') != id_key:
         raise RuntimeError("Not Authorized")
 
     # check we have all the required form data
