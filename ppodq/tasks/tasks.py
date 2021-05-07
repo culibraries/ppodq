@@ -3,7 +3,7 @@ import os
 import requests
 from requests.exceptions import Timeout, ConnectionError, HTTPError
 from enum import Enum
-from time import time
+from datetime import datetime, timezone
 
 
 ########  ENV VARIABLES  ########
@@ -62,7 +62,7 @@ def getDeliveryInfo(id_key, isbn):
 
     """
     Expecting to receive back from OASIS the following fields
-    of which we only care about the last three::
+    of which we only care about the last three:
        Environment: 'Development',
        RequestEnd: '/Date(1618604720623+0000)/',
        RequestStart: '/Date(1618604720266+0000)/',
@@ -126,13 +126,13 @@ def submitOrder(id_key, form_data):
          "department", "affiliation", "title", "author", "isbn",
          "delivery_days", "delivery_days_adjusted", "delivery_type")):
         result["code"] = 400
-        result["message"] = "Missing data"
+        result["message"] = "Missing required form data"
         return result
 
     # further validate the delivery type is valid 
     if form_data["delivery_type"] not in ["rush", "regular"]:
         result["code"] = 400
-        result["message"] = "Invalid Delivery Type"
+        result["message"] = "Invalid delivery choice"
         return result
 
     # ensure we have values for specific form data
@@ -142,7 +142,7 @@ def submitOrder(id_key, form_data):
         not form_data["last_name"] or
         not form_data["email"]):
         result["code"] = 400
-        result["message"] = "Missing data"
+        result["message"] = "Missing required form data"
         return result
 
     # Insert order request in DB 
@@ -180,10 +180,13 @@ def submitOrder(id_key, form_data):
         except (Timeout, ConnectionError, HTTPError) as err:
             # Log request errors
             print(err)
+            # let client know we could not process submit
+            result["code"] = 500
+            result["message"] = "Unable to notify library staff"
 
     # For regular orders, place the order with OASIS and email staff
     else:
-        order_error = False 
+        successful_order = False 
 
         """
         Expecting to receive back from OASIS the following fields
@@ -196,6 +199,14 @@ def submitOrder(id_key, form_data):
            Message: 'Success'
         """
         response = callOasisAPI("order", form_data["isbn"])
+
+        #
+        # Successful request
+        # If the request was not successful, we will just
+        # inform the staff via email and not return error
+        # to client so that they do not continue to submit
+        # the order multiple times.
+        #
         if response["status_code"] == 200:
             response_data = response["response_json"]
 
@@ -203,32 +214,26 @@ def submitOrder(id_key, form_data):
 
             # Oasis API sent a successful response
             if response_data["Code"] == 100:
-                order_error = False
+                successful_order = True
                 result["code"] = 0 
 
             # Oasis API did not recognize ISBN
-            elif response_data["Code"] == 200:
-                order_error = True
-                result["code"] = 400
-                print(result)
-            # Oasis API general error 
-            else:
-                order_error = True
-                result["code"] = response_data["Code"] 
+            #elif response_data["Code"] == 200:
+                #result["code"] = 400
 
-        else:
-            order_error = True
-            result["code"] = response["status_code"]
+            # Oasis API general error 
+            #else:
+            #   result["code"] = response_data["Code"] 
 
         # determing if staff gets order notification email or error notice 
-        if not order_error:
+        if successful_order:
             email_setting = setupEmail(PPOD_EMAIL_TYPE.REGULAR_ORDER_NOTICE,
                                        form_data["email"], form_data)
         else:
-            print("send error email")
             email_setting = setupEmail(PPOD_EMAIL_TYPE.ERROR_ORDER_NOTICE,
                                        form_data["email"], form_data)
 
+        # send email to staff about the order
         try:
             response = requests.post(
                 email_setting["url"],
@@ -240,6 +245,12 @@ def submitOrder(id_key, form_data):
         except (Timeout, ConnectionError, HTTPError) as err:
             # Log request errors
             print(err)
+
+            # the client needs to be notified that their book order
+            # failed and the staff was not notified of the error
+            if not successful_order:
+                result["code"] = 500
+
 
     # return our result
     return result
@@ -255,7 +266,7 @@ def recordBookOrder(id_key, db_data):
     # the header requires authorization via token
     headers = {"Authorization": "Token {0}".format(TOKEN)}
 
-    current_timestamp = time() 
+    current_datetime = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
 
     # store all the form data plus current timestamp
     post_data = {
@@ -271,7 +282,7 @@ def recordBookOrder(id_key, db_data):
         "delivery_days": db_data["delivery_days"],
         "delivery_days_adjusted": db_data["delivery_days_adjusted"],
         "delivery_type": db_data["delivery_type"],
-        "create_timestamp": str(current_timestamp)}
+        "create_datetime": current_datetime}
 
     try:
         response = requests.post(
@@ -305,7 +316,7 @@ def callOasisAPI(api_end_point, isbn):
 
     # order api endpoint has two other params
     if (api_end_point == 'order'):
-        requestData["Quanity"] = 1
+        requestData["Quantity"] = 1
         requestData["Dupeover"] = "false"
 
     # Call ProQuest Oasis API which returns the delivery days for given ISBN
