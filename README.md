@@ -1,7 +1,10 @@
 ppodq Queue
 ======================
 
-Print Purchase On Demand APIs.  This includes two APIs
+Print Purchase On Demand APIs.  
+Used by the Print Purchase web form to get estimated book delivery info
+and submit a book order. 
+
 
 Requirements
 ------------

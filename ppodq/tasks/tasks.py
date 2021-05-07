@@ -37,9 +37,8 @@ class PPOD_EMAIL_TYPE(Enum):
 @task(serializer='json')
 def getDeliveryInfo(id_key, isbn):
     """
-    Ask Oasis to provide book delivery info
-    for given isbn.
-    args: isbn
+    Ask Oasis to provide book delivery info for given isbn.
+    args: identiKey, isbn
     kwargs: {}
     """
 
@@ -58,6 +57,7 @@ def getDeliveryInfo(id_key, isbn):
     # ensure we have an isbn
     if (isbn is None):
         result["code"] = 400
+        result["message"] = "Missing ISBN"
         return result
 
     """
@@ -92,7 +92,6 @@ def getDeliveryInfo(id_key, isbn):
             result["message"] = response_data["Message"]
     else:
         result["code"] = response["status_code"]
-        result["message"] = response_data["Message"]
 
     # return our result
     return result
@@ -148,21 +147,6 @@ def submitOrder(id_key, form_data):
     # Insert order request in DB 
     response = recordBookOrder(id_key, form_data)
 
-    # Setup and email an order confirmation to patron
-    email_setting = setupEmail(PPOD_EMAIL_TYPE.CONFIRMATION_TO_PATRON,
-                               form_data["email"], form_data)
-    try:
-        response = requests.post(
-            email_setting["url"],
-            json = email_setting["post_data"],
-            headers = email_setting["headers"],
-            timeout = REQUEST_TIMEOUT)
-
-    # handle errors for sending email to patron by logging it
-    except (Timeout, ConnectionError, HTTPError) as err:
-        # Log request errors
-        print(err)
-
     # For rush orders, email the staff but do NOT order book
     if (form_data["delivery_type"] == "rush"):
         email_setting = setupEmail(PPOD_EMAIL_TYPE.RUSH_ORDER_NOTICE,
@@ -180,7 +164,7 @@ def submitOrder(id_key, form_data):
         except (Timeout, ConnectionError, HTTPError) as err:
             # Log request errors
             print(err)
-            # let client know we could not process submit
+            # let client know we could not process order
             result["code"] = 500
             result["message"] = "Unable to notify library staff"
 
@@ -217,15 +201,19 @@ def submitOrder(id_key, form_data):
                 successful_order = True
                 result["code"] = 0 
 
+            # Caller does not need to know of errors returned by OASIS.
+            # We will just inform staff via email.
+            #
+            # Incase in future we care to report back to client:
+            #
             # Oasis API did not recognize ISBN
             #elif response_data["Code"] == 200:
-                #result["code"] = 400
-
-            # Oasis API general error 
+            #    result["code"] = 400
+            # Oasis API general error
             #else:
             #   result["code"] = response_data["Code"] 
 
-        # determing if staff gets order notification email or error notice 
+        # determining if staff gets order notification email or error notice 
         if successful_order:
             email_setting = setupEmail(PPOD_EMAIL_TYPE.REGULAR_ORDER_NOTICE,
                                        form_data["email"], form_data)
@@ -247,10 +235,26 @@ def submitOrder(id_key, form_data):
             print(err)
 
             # the client needs to be notified that their book order
-            # failed and the staff was not notified of the error
+            # failed because error email to staff was unable to be sent.
             if not successful_order:
                 result["code"] = 500
 
+    # Send confirmation email to patron only if all went as planned
+    if (result["code"] == 0):
+        # Setup and email an order confirmation to patron
+        email_setting = setupEmail(PPOD_EMAIL_TYPE.CONFIRMATION_TO_PATRON,
+                                   form_data["email"], form_data)
+        try:
+            response = requests.post(
+                email_setting["url"],
+                json = email_setting["post_data"],
+                headers = email_setting["headers"],
+                timeout = REQUEST_TIMEOUT)
+
+        # handle errors for sending email to patron by logging it
+        except (Timeout, ConnectionError, HTTPError) as err:
+            # Log request errors
+            print(err)
 
     # return our result
     return result
@@ -363,7 +367,7 @@ def setupEmail(email_type, patron_email, email_data):
         "affiliation": email_data["affiliation"],
         "department": email_data["department"],
         "email": email_data["email"],
-        "delivery": email_data["delivery_type"],
+        "delivery_type": email_data["delivery_type"],
         "delivery_days": email_data["delivery_days_adjusted"]
     }
 
@@ -383,7 +387,7 @@ def setupEmail(email_type, patron_email, email_data):
         elif (email_type == PPOD_EMAIL_TYPE.ERROR_ORDER_NOTICE):
             subject = "PPOD Error in Order"
             # change to indicate error with order
-            template_data["delivery"] = "error"
+            template_data["delivery_type"] = "error"
         else:
             subject = "Print Purchase on Demand Order"
 
