@@ -1,6 +1,7 @@
 from celery.task import task
 import os
 import requests
+import time
 from requests.exceptions import Timeout, ConnectionError, HTTPError
 from enum import Enum
 from datetime import datetime, timezone
@@ -158,7 +159,14 @@ def submitOrder(id_key, form_data):
                 headers = email_setting["headers"],
                 timeout = REQUEST_TIMEOUT)
 
-            # TODO - poll the returned url to check status
+            # poll the email task result url to ensure it was sent
+            response_result = response.json();
+            email_sent = watchEmailTask(response_result["result_url"]);
+
+            # let client know we could not process order
+            if not email_sent:
+                result["code"] = 500
+                result["message"] = "Unable to notify library staff"
 
         # handle errors for sending email to staff by logging it
         except (Timeout, ConnectionError, HTTPError) as err:
@@ -407,3 +415,36 @@ def setupEmail(email_type, patron_email, email_data):
         "post_data": post_data,
         "headers": headers,
         "url": EMAIL_URL}
+
+def watchEmailTask(task_url):
+    tries = 0;
+    job_status = "PENDING"
+
+    while job_status == "PENDING":
+        try:
+            response = requests.get(
+                task_url,
+                timeout = REQUEST_TIMEOUT)
+
+            response_result = response.json()
+
+            job_status = response_result.get("result", {}).get("status")
+
+        # Handle all common errors that could occur with request
+        except Timeout as err:
+            print(err)
+        except (ConnectionError, HTTPError) as err:
+            print(err)
+
+        # have a way out incase the task is stalled
+        if ++tries > 50:
+            break;
+
+        # wait 1 second before checking the email task result
+        time.sleep(0.5)
+
+
+    if job_status == "SUCCESS":
+        return True
+    else:
+        return False
